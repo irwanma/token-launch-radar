@@ -307,6 +307,11 @@ export const STAKING_RATE = 0.03;
 const STAKING_YIELD_CATEGORIES = new Set(['Staking Pool', 'Restaking', 'Liquid Restaking', 'Restaked BTC', 'Anchor BTC', 'Decentralized BTC']);
 export const HOLD_DAYS: Record<MechClass, number> = { Capital: 90, Hybrid: 60, Points: 30 };
 export const ACTIONS: Record<MechClass, number> = { Capital: 4, Hybrid: 6, Points: 10 };
+/** v3: one maintenance action per 30 days of hold, charged at the primary chain's gas price.
+ *  The farm steps already say acting on a weekly check costs gas; v2 charged only the setup
+ *  actions, so the plan's own text named a cost its net never paid. One action a month is
+ *  the stated rate: a farmer looks weekly and acts about monthly. */
+export const MAINT_DAYS = 30;
 export const SETUP_MINUTES: Record<MechClass, number> = { Capital: 45, Hybrid: 90, Points: 120 };
 export const WEEKLY_MINUTES: Record<MechClass, number> = { Capital: 10, Hybrid: 25, Points: 45 };
 const PROTOCOL_FEE: Record<MechClass, number> = { Capital: 1, Hybrid: 2, Points: 0 };
@@ -317,7 +322,7 @@ export interface FarmCalc {
   hold_days: number;
   slice: number;
   slice_p25: number;
-  costs: { gas: number; fees: number; il: number; bridge: number; opportunity: number; total: number; cash_total: number };
+  costs: { gas: number; fees: number; il: number; bridge: number; opportunity: number; maintenance: number; total: number; cash_total: number };
   net: number;
   net_p25: number;
   net_hr: number;
@@ -329,6 +334,7 @@ export interface FarmCalc {
   robust: boolean;
   setup_minutes: number;
   weekly_minutes: number;
+  maint_actions: number;
   hours: number;
 }
 
@@ -344,7 +350,9 @@ function farmCalc(p: Protocol, value: number, bandLoMult: number): FarmCalc {
   const bridge = p.chains.length >= 3 && cls !== 'Points' ? 4 + 0.0025 * TICKET_USD : 0;
   const oppRate = STAKING_YIELD_CATEGORIES.has(p.category ?? '') ? STAKING_RATE : TBILL_RATE;
   const opportunity = (TICKET_USD * oppRate * hold) / 365;
-  const cashTotal = gas + fees + il + bridge;
+  const maintActions = Math.ceil(hold / MAINT_DAYS);
+  const maintenance = maintActions * gasOf(chain);
+  const cashTotal = gas + fees + il + bridge + maintenance;
   const total = cashTotal + opportunity;
   const net = slice - total;
   const netP25 = sliceP25 - total;
@@ -353,13 +361,13 @@ function farmCalc(p: Protocol, value: number, bandLoMult: number): FarmCalc {
   const verdict: FarmCalc['verdict'] = net > 0 ? 'FARM' : slice > cashTotal ? 'THIN' : 'SKIP';
   return {
     cls, chain, hold_days: hold, slice, slice_p25: sliceP25,
-    costs: { gas, fees, il, bridge, opportunity, total, cash_total: cashTotal },
+    costs: { gas, fees, il, bridge, opportunity, maintenance, total, cash_total: cashTotal },
     net, net_p25: netP25, net_hr: net / hours, net_hr_p25: netP25 / hours,
     net_sensitivity: (value * SENSITIVITY_SHARE * TICKET_USD) / p.tvl_usd - total,
     break_even_value: (total * p.tvl_usd) / (SLICE_SHARE * TICKET_USD),
     max_wait_months: net > 0 ? net / ((TICKET_USD * TBILL_RATE) / 12 + gasOf(chain)) : 0,
     verdict, robust,
-    setup_minutes: SETUP_MINUTES[cls], weekly_minutes: WEEKLY_MINUTES[cls], hours,
+    setup_minutes: SETUP_MINUTES[cls], weekly_minutes: WEEKLY_MINUTES[cls], maint_actions: maintActions, hours,
   };
 }
 
@@ -441,6 +449,8 @@ export interface RadarRow extends BoardRow {
   band_p10: number;
   band_p90: number;
   farm_rank: number;
+  rank_lo: number;
+  rank_hi: number;
   divergence: number;
   farm: FarmCalc;
   peers: { name: string; tvl_usd: number; mcap_usd: number }[] | null;
@@ -463,7 +473,8 @@ export interface Radar {
     families: { family: string; n: number; offset: number }[];
     band_dex: { q10: number; q25: number; q75: number; q90: number };
     loo: { stage: string; median_miss: number; in3: number; in10: number }[];
-    cohort: { train_n: number; test_n: number; flat_miss: number; model_miss: number; flat_in3: number; model_in3: number; stage2_miss: number; stage2_in3: number };
+    cohort: { train_n: number; test_n: number; flat_miss: number; model_miss: number; flat_in3: number; model_in3: number; stage2_miss: number; stage2_in3: number; band_hold_2575: number; band_hold_1090: number };
+    rank_bootstrap_refits: number;
     worst: { name: string; miss: number; predicted: number; actual: number }[];
     buckets: { label: string; n: number; q25: number; q75: number }[];
     gates: { factor: string; coef: string; loo_improvement: number; cohort_sign: string; bootstrap: number; passed: boolean }[];
@@ -599,6 +610,32 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
   const cohortFlatR = cohortMiss(cohortFlat, 0);
   const cohortStage2 = cohortMiss(fitStage(preCohort, 2, medianChange, asOfMs, tradedRoots), 2);
 
+  // v3: out-of-sample band hold rate. The band's quartiles are built from the pre-2024 comps'
+  // own leave-one-out residuals, then the post-2024 comps are checked against that band — so
+  // this is a genuine out-of-sample calibration test of the P25 the farms are netted on, not a
+  // restatement of the in-sample quantiles (which hold ~50% by construction).
+  const preLooPred: number[] = [];
+  for (let i = 0; i < preCohort.length; i++) {
+    const rest = preCohort.filter((_, j) => j !== i);
+    const f = fitStage(rest, finalStage, medianChange, asOfMs, tradedRoots);
+    let v = predictStage(f, preCohort[i]!, finalStage, medianChange, asOfMs, gated.breadth);
+    if (finalStage >= 4 && gated.kinship && hasTradedNamesake(preCohort[i]!, tradedRoots)) v *= Math.pow(10, f.kinshipCoef);
+    preLooPred.push(v);
+  }
+  const preLooResid = preCohort.map((p, i) => Math.log10(preLooPred[i]! / p.mcap_usd!));
+  const holdQ25 = quantile(preLooResid, 0.25), holdQ75 = quantile(preLooResid, 0.75);
+  const holdQ10 = quantile(preLooResid, 0.1), holdQ90 = quantile(preLooResid, 0.9);
+  let hold2575 = 0, hold1090 = 0;
+  for (const p of postCohort) {
+    let v = predictStage(cohortFit, p, finalStage, medianChange, asOfMs, gated.breadth);
+    if (finalStage >= 4 && gated.kinship && hasTradedNamesake(p, tradedRoots)) v *= Math.pow(10, cohortFit.kinshipCoef);
+    const r = Math.log10(p.mcap_usd! / v);
+    if (r >= holdQ25 && r <= holdQ75) hold2575++;
+    if (r >= holdQ10 && r <= holdQ90) hold1090++;
+  }
+  const bandHold2575 = postCohort.length === 0 ? 0 : hold2575 / postCohort.length;
+  const bandHold1090 = postCohort.length === 0 ? 0 : hold1090 / postCohort.length;
+
   // Price the board.
   const fit = fitStage(train, finalStage, medianChange, asOfMs, tradedRoots);
   const bandLoMult = Math.pow(10, bandDex.q25);
@@ -619,12 +656,38 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
       watchlist: watch.has(p.slug),
       band_p25: Math.round(value * bandLoMult), band_p75: Math.round(value * Math.pow(10, bandDex.q75)),
       band_p10: Math.round(value * Math.pow(10, bandDex.q10)), band_p90: Math.round(value * Math.pow(10, bandDex.q90)),
-      farm_rank: 0, divergence: 0, farm, peers: null, waterfall: null, flags: null,
+      farm_rank: 0, rank_lo: 0, rank_hi: 0, divergence: 0, farm, peers: null, waterfall: null, flags: null,
     };
   });
   // Farm Rank: by net per hour at the band's low end (P25), best first.
   const byFarm = [...rows].sort((a, b) => b.farm.net_hr_p25 - a.farm.net_hr_p25 || (a.slug < b.slug ? -1 : 1));
   byFarm.forEach((r, i) => { r.farm_rank = i + 1; r.divergence = r.rank - r.farm_rank; });
+
+  // v3: bootstrap rank ranges. 200 seeded refits of the frozen model form (same stage and gate
+  // outcome, only the comp set resampled); each refit re-prices every board row, and a row's
+  // rank_lo/rank_hi are the 5th/95th percentiles of its 200 refit ranks. A tight range means
+  // the curve is sure where the row belongs; a wide one means the rank is mostly noise.
+  const RANK_BOOTSTRAP_REFITS = 200;
+  const rankSamples = new Map<string, number[]>();
+  for (const r of rows) rankSamples.set(r.slug, []);
+  {
+    const rnd = mulberry32(20261118);
+    for (let b = 0; b < RANK_BOOTSTRAP_REFITS; b++) {
+      const sample = Array.from({ length: train.length }, () => train[Math.floor(rnd() * train.length)]!);
+      const f = fitStage(sample, finalStage, medianChange, asOfMs, tradedRoots);
+      const pricedB = pool.map((p) => {
+        let v = predictStage(f, p, finalStage, medianChange, asOfMs, gated.breadth);
+        if (finalStage >= 4 && gated.kinship && hasTradedNamesake(p, tradedRoots)) v *= Math.pow(10, f.kinshipCoef);
+        return { slug: p.slug, v };
+      }).sort((a, b2) => b2.v - a.v || (a.slug < b2.slug ? -1 : 1));
+      pricedB.forEach((x, i) => { rankSamples.get(x.slug)!.push(i + 1); });
+    }
+  }
+  for (const r of rows) {
+    const rs = rankSamples.get(r.slug)!;
+    r.rank_lo = Math.max(1, Math.round(quantile(rs, 0.05)));
+    r.rank_hi = Math.min(rows.length, Math.round(quantile(rs, 0.95)));
+  }
 
   // Asymmetric depth for the 40 watchlist rows: peers, waterfall, flags.
   for (const row of rows) {
@@ -718,7 +781,8 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
       n_candidates: nCandidates, n_train: train.length, trimmed,
       median_change_7d: medianChange, families: famSummary, band_dex: bandDex,
       loo: looStages,
-      cohort: { train_n: preCohort.length, test_n: postCohort.length, flat_miss: cohortFlatR.medianMiss, model_miss: cohortModel.medianMiss, flat_in3: cohortFlatR.in3, model_in3: cohortModel.in3, stage2_miss: cohortStage2.medianMiss, stage2_in3: cohortStage2.in3 },
+      cohort: { train_n: preCohort.length, test_n: postCohort.length, flat_miss: cohortFlatR.medianMiss, model_miss: cohortModel.medianMiss, flat_in3: cohortFlatR.in3, model_in3: cohortModel.in3, stage2_miss: cohortStage2.medianMiss, stage2_in3: cohortStage2.in3, band_hold_2575: bandHold2575, band_hold_1090: bandHold1090 },
+      rank_bootstrap_refits: RANK_BOOTSTRAP_REFITS,
       worst, buckets, gates,
     },
     verdicts,

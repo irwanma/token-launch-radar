@@ -2,12 +2,34 @@
 [![rank](https://make.fun/badge/token-radar-01/irwanma/token-launch-radar/rank.svg)](https://make.fun/bounty/token-radar-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
 [![reward](https://make.fun/badge/token-radar-01/irwanma/token-launch-radar/reward.svg)](https://make.fun/bounty/token-radar-01?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
 
-# Token Launch Radar — radar-3
+# Token Launch Radar — radar-3 (entry v3)
 
 An entry for make.fun's token-radar-01 ("Build the best token launch radar"). It prices every
 pre-token protocol in the house's sealed snapshot with a model fitted on the protocols that
 already trade, shows its backtest next to the board, and nets each row into a farm plan on a
 $1,000 ticket with itemised costs.
+
+## What v3 changes over v2 (same model, same snapshot)
+
+The fitted curve is untouched (α 4.44, β 0.353, LOO ×2.54, cohort ×2.18 — identical to v2).
+Four refinements, all computed from the same snapshot:
+
+- **Netting is complete:** the farm engine now charges one maintenance action per 30 days of
+  hold (Capital +3, Hybrid +2, Points +1 actions at the primary chain's gas price). v2's own
+  farm steps already said acting on a weekly check costs gas, but the net never charged it.
+  Verdicts move 91/53/19/37 → 88/44/19/49 (ROBUST/FARM/THIN/SKIP); the Starter Basket stays
+  five rows at +$563.96 (was +$575.20). The P25 band itself was checked, not widened: on the
+  32 comps listed from 2024, the pre-2024 band holds 50% inside P25–P75 and 78% inside
+  P10–P90, so the band is calibrated out of sample and the verdict level is what the data
+  gives — it is not tuned toward any range.
+- **Bootstrap rank ranges:** every row's rank carries a 90% interval from 200 seeded refits of
+  the frozen model form (same stage and gate outcome, only the comp set resampled). The top
+  table shows them (#1 sits 1–16); a wide range means the rank is mostly noise, and the board
+  says so instead of printing a false precision.
+- **Band hold rate, reported:** the validation panel now states the out-of-sample hold rate
+  above, so the P25 the farms are netted on is evidenced, not asserted.
+- **Board-first cover:** the page opens with a dense KPI strip and the top-12 board before any
+  essay, so the first screenshot shows the radar working, not the model description.
 
 ## The model
 
@@ -43,7 +65,8 @@ Each protocol is classified from its category as Capital-weighted, Points/Action
 $1,000 ticket at a 10% pro-rata community slice (5% shown as a sensitivity in every detail view),
 the engine charges gas per action on the primary chain, protocol fees, an impermanent-loss drag
 of 2–5% for liquidity mechanisms, a bridge fee plus risk charge for multi-chain capital plans,
-and forgone yield (4% T-bill; 3% where the position is itself a staking asset). Verdicts: ROBUST
+and forgone yield (4% T-bill; 3% where the position is itself a staking asset), plus one
+maintenance action per 30 days of hold at the primary chain's gas price. Verdicts: ROBUST
 when the net stays positive at the P25 band end, FARM when positive at the point value, THIN when
 the slice covers cash costs but not the forgone yield, SKIP otherwise. Farm Rank orders by net
 per hour at P25. The dashboard prints the full assumptions table.

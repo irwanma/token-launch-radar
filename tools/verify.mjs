@@ -45,12 +45,14 @@ for (const b of board) {
   if (!d) { fail(`board/data: ${b.slug} missing from data.js`); continue; }
   if (d.rank !== b.rank || d.implied_value_usd !== b.implied_value_usd) fail(`board/data: ${b.slug} rank or value differs`);
   if (JSON.stringify(d.farm_steps) !== JSON.stringify(b.farm_steps)) fail(`board/data: ${b.slug} farm steps differ`);
+  if (!(d.rank_lo <= d.rank && d.rank <= d.rank_hi)) fail(`board/data: ${b.slug} rank ${d.rank} outside its bootstrap range ${d.rank_lo}–${d.rank_hi}`);
+  if (!Number.isInteger(d.rank_lo) || !Number.isInteger(d.rank_hi)) fail(`board/data: ${b.slug} rank range is not whole numbers`);
 }
 
 // 3. Every net is its slice minus its itemised costs; verdicts follow their definitions.
 for (const r of radar.rows) {
   const f = r.farm;
-  const costSum = f.costs.gas + f.costs.fees + f.costs.il + f.costs.bridge + f.costs.opportunity;
+  const costSum = f.costs.gas + f.costs.fees + f.costs.il + f.costs.bridge + f.costs.opportunity + f.costs.maintenance;
   if (!near(f.costs.total, costSum, 0.011)) fail(`net: ${r.slug} itemised costs sum to ${costSum.toFixed(2)}, total says ${f.costs.total.toFixed(2)}`);
   if (!near(f.net, f.slice - f.costs.total, 0.011)) fail(`net: ${r.slug} net ${f.net.toFixed(2)} != slice ${f.slice.toFixed(2)} - costs ${f.costs.total.toFixed(2)}`);
   const slice = (r.implied_value_usd * 0.10 * 1000) / r.tvl_usd;

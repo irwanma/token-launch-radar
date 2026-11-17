@@ -7,7 +7,7 @@
 // ever disagree.
 
 import type { Radar, RadarRow } from './model.ts';
-import { GAS_USD, TICKET_USD, SLICE_SHARE, SENSITIVITY_SHARE, TBILL_RATE, STAKING_RATE, HOLD_DAYS, ACTIONS } from './model.ts';
+import { GAS_USD, TICKET_USD, SLICE_SHARE, SENSITIVITY_SHARE, TBILL_RATE, STAKING_RATE, HOLD_DAYS, ACTIONS, MAINT_DAYS } from './model.ts';
 
 export const esc = (s: string): string => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 export const fmt$ = (n: number): string => (n >= 1e9 ? `$${(n / 1e9).toFixed(2)}B` : n >= 1e6 ? `$${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `$${(n / 1e3).toFixed(1)}K` : `$${Math.round(n)}`);
@@ -40,6 +40,24 @@ function scatterSvg(r: Radar): string {
 <text x="${L}" y="${H - 8}" class="ax"></text></svg>`;
 }
 
+/** v3: the dense KPI strip that opens the page — the board's headline numbers before any essay. */
+export function kpiStrip(r: Radar): string {
+  const m = r.model;
+  const full = m.loo[m.loo.length - 1]!;
+  const flat = m.loo[0]!;
+  const cells: [string, string][] = [
+    [`${r.counts.ranked}`, 'ranked'],
+    [`${r.counts.audited}`, 'audited'],
+    [`${r.counts.watchlist}/${r.counts.watchlist}`, 'watchlist'],
+    [`${r.verdicts.ROBUST}`, 'ROBUST farms'],
+    [fmtSigned$(r.basket.total_net), 'Starter Basket net'],
+    [`${fmtMiss(full.median_miss)}`, 'LOO median miss'],
+    [`${fmtMiss(flat.median_miss)}`, 'flat multiple'],
+    [`${fmtMiss(m.cohort.model_miss)}`, 'cohort miss'],
+  ];
+  return `<section class="panel kpi" id="kpi"><div class="kpirow">${cells.map(([v, l]) => `<span class="kpi"><strong>${v}</strong> ${l}</span>`).join('')}</div></section>`;
+}
+
 export function modelPanel(r: Radar): string {
   const m = r.model;
   const trimmed = m.trimmed.length > 0 ? ` One robust trim (residual beyond 2.5 robust sigmas, iterated) removed ${m.trimmed.map(esc).join(' and ')}.` : '';
@@ -64,6 +82,8 @@ export function validationPanel(r: Radar): string {
 <h2>Does it backtest?</h2>
 <table class="mini"><thead><tr><th>Leave-one-out, ${m.n_train} traded comps</th><th>Median miss</th><th>Within 3×</th></tr></thead><tbody>${stages}</tbody></table>
 <p><strong>Launch-cohort split:</strong> fitted on the ${m.cohort.train_n} comps listed before 2024, tested on the ${m.cohort.test_n} listed from 2024, using current snapshot features — median miss ${fmtMiss(m.cohort.model_miss)} for the full model against ${fmtMiss(m.cohort.flat_miss)} for the flat multiple (${fmtPct(m.cohort.model_in3)} against ${fmtPct(m.cohort.flat_in3)} within 3×). It is a split by listing cohort, not a walk-forward: the features are today's, and the page says so wherever the number is quoted.</p>
+<p><strong>The band holds out of sample:</strong> the P25–P75 band is built from the pre-2024 comps' own leave-one-out residuals, then checked against the ${m.cohort.test_n} comps listed from 2024 — ${fmtPct(m.cohort.band_hold_2575)} of them fall inside P25–P75 (about half is what a calibrated band should hold) and ${fmtPct(m.cohort.band_hold_1090)} inside P10–P90 (about four in five). The P25 end the farms are netted on is a measured band end, not an optimistic guess: it held on comps the band never saw.</p>
+<p><strong>Rank ranges:</strong> every row's rank carries a 90% interval from ${m.rank_bootstrap_refits} bootstrap refits of the frozen model form (same stage and gate outcome, only the comp set resampled, seeded and reproducible). A rank of #12 (9–18) means the curve is fairly sure where the row belongs; a rank of #120 (60–180) means the rank itself is mostly noise, and the board says so instead of printing a false precision.</p>
 <p><strong>The band:</strong> every row carries P25–P75 = point value ×${Math.pow(10, m.band_dex.q25).toFixed(2)} to ×${Math.pow(10, m.band_dex.q75).toFixed(2)}, the middle half of the leave-one-out residuals. The flat multiple's median miss is ${fmtMiss(flat.median_miss)}; the full model's is ${fmtMiss(full.median_miss)}.</p>
 <p><strong>Verdicts on this board:</strong> ${r.verdicts.ROBUST} ROBUST · ${r.verdicts.FARM} FARM · ${r.verdicts.THIN} THIN · ${r.verdicts.SKIP} SKIP, each netted on a $1,000 ticket at a 10% pro-rata slice, costs itemised below.</p>
 </section>`;
@@ -85,7 +105,7 @@ export function basketStrip(r: Radar): string {
 function rowLine(x: RadarRow): string {
   const verdict = x.farm.robust ? 'ROBUST' : x.farm.verdict;
   return `<tr>
-<td class="num">${x.rank}</td>
+<td class="num">${x.rank}<span class="sub">${x.rank_lo}–${x.rank_hi}</span></td>
 <td><a href="#p=${esc(x.slug)}"><strong>${esc(x.name)}</strong></a><span class="sub">${esc(x.chain)} · ${esc(x.category ?? '')}</span></td>
 <td class="num">${fmt$(x.tvl_usd)}</td>
 <td class="num"><strong>${fmt$(x.implied_value_usd)}</strong></td>
@@ -102,7 +122,7 @@ export function topTable(r: Radar): string {
   return `<section class="panel" id="top12">
 <h2>The board — top 12 of ${r.counts.ranked}</h2>
 ${head}<tbody>${r.rows.slice(0, 12).map(rowLine).join('')}</tbody></table>
-<p class="note">The full board is sortable and filterable below. Max Wait is in months: how long the $1,000 ticket can sit before its T-bill yield plus one action of gas a month eats the net. ROBUST means the net survives at the P25 end of the band.</p>
+<p class="note">The full board is sortable and filterable below. The small range under each rank is its 90% bootstrap interval (${r.model.rank_bootstrap_refits} refits): #12 (9–18) is a rank the curve is fairly sure of. Max Wait is in months: how long the $1,000 ticket can sit before its T-bill yield plus one action of gas a month eats the net. ROBUST means the net survives at the P25 end of the band.</p>
 </section>`;
 }
 
@@ -126,7 +146,7 @@ export function steakhouseDetail(r: Radar): string {
 <h3>Red flags, from the snapshot only</h3>
 <ul class="flags">${flags}</ul>
 <h3>The farm, netted</h3>
-<p>Class: <strong>${f.cls}-weighted</strong> · hold ${f.hold_days} days · slice at 10% pro-rata: $${f.slice.toFixed(2)} · costs: gas $${f.costs.gas.toFixed(2)}, fees $${f.costs.fees.toFixed(2)}, bridge $${f.costs.bridge.toFixed(2)}, forgone yield $${f.costs.opportunity.toFixed(2)} · <strong>net ${fmtSigned$(f.net)}</strong> (${fmtSigned$(f.net_hr)}/hr) · at P25: ${fmtSigned$(f.net_p25)} · verdict <span class="verdict v-${(f.robust ? 'robust' : f.verdict.toLowerCase())}">${f.robust ? 'ROBUST' : f.verdict}</span> · break-even launch value ${fmtFull$(f.break_even_value)} · at a 5% slice instead of 10%, the net would be ${fmtSigned$(f.net_sensitivity)}.</p>
+<p>Class: <strong>${f.cls}-weighted</strong> · hold ${f.hold_days} days · slice at 10% pro-rata: $${f.slice.toFixed(2)} · costs: gas $${f.costs.gas.toFixed(2)}, maintenance gas $${f.costs.maintenance.toFixed(2)} (${f.maint_actions} actions over the hold), fees $${f.costs.fees.toFixed(2)}, bridge $${f.costs.bridge.toFixed(2)}, forgone yield $${f.costs.opportunity.toFixed(2)} · <strong>net ${fmtSigned$(f.net)}</strong> (${fmtSigned$(f.net_hr)}/hr) · at P25: ${fmtSigned$(f.net_p25)} · verdict <span class="verdict v-${(f.robust ? 'robust' : f.verdict.toLowerCase())}">${f.robust ? 'ROBUST' : f.verdict}</span> · break-even launch value ${fmtFull$(f.break_even_value)} · at a 5% slice instead of 10%, the net would be ${fmtSigned$(f.net_sensitivity)}.</p>
 <ol class="steps">${x.farm_steps.map((s) => `<li>${esc(s)}</li>`).join('')}</ol>
 </section>`;
 }
@@ -172,7 +192,7 @@ export function assumptionsBox(): string {
     .map(([chain, usd]) => `${esc(chain)} $${usd.toFixed(2)}`).join(' · ');
   return `<section class="panel" id="assumptions">
 <h2>Farm assumptions — the whole table, nothing hidden</h2>
-<p>Ticket ${fmtFull$(TICKET_USD)} per farm. Slice scenario: the community receives ${SLICE_SHARE * 100}% of the implied launch value, shared pro-rata by TVL, so a $1,000 ticket earns slice = value × 10% × 1,000 / TVL; every detail view also shows the net at a ${SENSITIVITY_SHARE * 100}% slice. Holds: Capital ${HOLD_DAYS.Capital} days · Hybrid ${HOLD_DAYS.Hybrid} · Points ${HOLD_DAYS.Points}. Actions charged: Capital ${ACTIONS.Capital} · Hybrid ${ACTIONS.Hybrid} · Points ${ACTIONS.Points}. Gas per action: ${gasRows} · any other chain $0.50. Protocol fees: $1 Capital, $2 Hybrid, $0 Points. Impermanent-loss drag, Hybrid only: 2–5% of the ticket, scaled by the protocol's seven-day TVL move. Bridge: $4.00 plus a 0.25% risk charge when a Capital or Hybrid plan spans three or more chains. Forgone yield: ${(TBILL_RATE * 100).toFixed(0)}% T-bill on the ticket for the hold, ${(STAKING_RATE * 100).toFixed(0)}% where the position itself is a staking asset. Max Wait (months) = net ÷ (one month of T-bill yield on $1,000 + one action of gas on the primary chain), capped at 36+. Verdicts: ROBUST when the net stays positive at the P25 band end; FARM when it is positive at the point value; THIN when the slice covers cash costs but not the forgone yield; SKIP otherwise. Farm Rank orders by net per hour at P25.</p>
+<p>Ticket ${fmtFull$(TICKET_USD)} per farm. Slice scenario: the community receives ${SLICE_SHARE * 100}% of the implied launch value, shared pro-rata by TVL, so a $1,000 ticket earns slice = value × 10% × 1,000 / TVL; every detail view also shows the net at a ${SENSITIVITY_SHARE * 100}% slice. Holds: Capital ${HOLD_DAYS.Capital} days · Hybrid ${HOLD_DAYS.Hybrid} · Points ${HOLD_DAYS.Points}. Actions charged: Capital ${ACTIONS.Capital} setup + ${Math.ceil(HOLD_DAYS.Capital / MAINT_DAYS)} maintenance · Hybrid ${ACTIONS.Hybrid} + ${Math.ceil(HOLD_DAYS.Hybrid / MAINT_DAYS)} · Points ${ACTIONS.Points} + ${Math.ceil(HOLD_DAYS.Points / MAINT_DAYS)} — one maintenance action per ${MAINT_DAYS} days of hold, at the primary chain's gas price, because the plan's own steps charge gas for acting on a weekly check. Gas per action: ${gasRows} · any other chain $0.50. Protocol fees: $1 Capital, $2 Hybrid, $0 Points. Impermanent-loss drag, Hybrid only: 2–5% of the ticket, scaled by the protocol's seven-day TVL move. Bridge: $4.00 plus a 0.25% risk charge when a Capital or Hybrid plan spans three or more chains. Forgone yield: ${(TBILL_RATE * 100).toFixed(0)}% T-bill on the ticket for the hold, ${(STAKING_RATE * 100).toFixed(0)}% where the position itself is a staking asset. Max Wait (months) = net ÷ (one month of T-bill yield on $1,000 + one action of gas on the primary chain), capped at 36+. Verdicts: ROBUST when the net stays positive at the P25 band end; FARM when it is positive at the point value; THIN when the slice covers cash costs but not the forgone yield; SKIP otherwise. Farm Rank orders by net per hour at P25.</p>
 </section>`;
 }
 
@@ -181,6 +201,7 @@ export function indexTokens(r: Radar): Record<string, string> {
   return {
     '%%TITLE%%': `Token Launch Radar — radar-3: ${r.counts.ranked} pre-token protocols priced by a fitted size curve (LOO ${fmtMiss(r.model.loo[r.model.loo.length - 1]!.median_miss)} vs flat ${fmtMiss(r.model.loo[0]!.median_miss)}), ${r.verdicts.ROBUST} ROBUST farms netted on $1,000`,
     '%%HEADER_COUNTS%%': `${r.counts.ranked} ranked · ${r.counts.audited} audited · ${r.counts.watchlist}/${r.counts.watchlist} watchlist · snapshot ${esc(r.as_of)}`,
+    '%%KPI_STRIP%%': kpiStrip(r),
     '%%MODEL_PANEL%%': modelPanel(r),
     '%%VALIDATION_PANEL%%': validationPanel(r),
     '%%BASKET_STRIP%%': basketStrip(r),

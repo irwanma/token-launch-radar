@@ -42,7 +42,7 @@ function renderBoard() {
   const th = (k, label, num) => `<th class="sortable${num ? ' num' : ''}" data-sort="${k}">${label}${arrow(k)}</th>`;
   const body = list.map((r) => {
     const v = verdictOf(r);
-    return `<tr><td class="num">${r.rank}</td>
+    return `<tr><td class="num">${r.rank}<span class="sub">${r.rank_lo}–${r.rank_hi}</span></td>
 <td><a href="#p=${esc(r.slug)}"><strong>${esc(r.name)}</strong></a>${r.watchlist ? ' ★' : ''}<span class="sub">${esc(r.chain)} · ${esc(r.category ?? '')} · ${esc(r.farm.cls)}</span></td>
 <td class="num">${fmt$(r.tvl_usd)}</td><td class="num"><strong>${fmt$(r.implied_value_usd)}</strong></td>
 <td class="num band">${fmt$(r.band_p25)} – ${fmt$(r.band_p75)}</td>
@@ -78,7 +78,8 @@ ${wf}${peers}${flags}
 <h3>The farm, netted — ${esc(f.cls)}-weighted, ${f.hold_days}-day hold, Farm Rank #${r.farm_rank} (value rank #${r.rank}, divergence ${r.divergence >= 0 ? '+' : ''}${r.divergence})</h3>
 <table class="costs"><tbody>
 <tr><td>Slice at 10% pro-rata on a $1,000 ticket</td><td class="num">${fmtC$(f.slice)}</td></tr>
-<tr><td>Gas (${f.cls === 'Capital' ? 4 : f.cls === 'Hybrid' ? 6 : 10} actions on ${esc(f.chain)})</td><td class="num">−${fmtC$(f.costs.gas)}</td></tr>
+<tr><td>Gas (${f.cls === 'Capital' ? 4 : f.cls === 'Hybrid' ? 6 : 10} setup actions on ${esc(f.chain)})</td><td class="num">−${fmtC$(f.costs.gas)}</td></tr>
+<tr><td>Maintenance gas (${f.maint_actions} actions over the ${f.hold_days}-day hold)</td><td class="num">−${fmtC$(f.costs.maintenance)}</td></tr>
 <tr><td>Protocol fees</td><td class="num">−${fmtC$(f.costs.fees)}</td></tr>
 <tr><td>Impermanent-loss drag</td><td class="num">−${fmtC$(f.costs.il)}</td></tr>
 <tr><td>Bridge + risk charge</td><td class="num">−${fmtC$(f.costs.bridge)}</td></tr>
