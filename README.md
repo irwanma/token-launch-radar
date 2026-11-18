@@ -2,14 +2,44 @@
 [![rank](https://make.fun/badge/token-radar-01/irwanma/token-launch-radar/rank.svg)](https://make.fun/bounty/token-radar-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
 [![reward](https://make.fun/badge/token-radar-01/irwanma/token-launch-radar/reward.svg)](https://make.fun/bounty/token-radar-01?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
 
-# Token Launch Radar — radar-3 (entry v3)
+# Token Launch Radar — radar-4 (entry v4)
 
 An entry for make.fun's token-radar-01 ("Build the best token launch radar"). It prices every
 pre-token protocol in the house's sealed snapshot with a model fitted on the protocols that
 already trade, shows its backtest next to the board, and nets each row into a farm plan on a
 $1,000 ticket with itemised costs.
 
-## What v3 changes over v2 (same model, same snapshot)
+## What v4 changes over v3 (refit + launch odds, same snapshot)
+
+Two changes, both computed from the same snapshot and both verified by an independent
+Python replica of the stage-3 pipeline (control row reproduces v2 exactly):
+
+- **The curve is refit, not re-trimmed:** OLS + hard trim is replaced by a Huber fit
+  (δ = 1.345, scale from the median absolute residual, iterated to convergence). No comp is
+  deleted any more — the two farthest (Rain 0.32, Bitway Earn 0.42) are weighted down and
+  listed on the page. The floor is chosen by a pre-committed grid ($1M / $500K / $250K ×
+  Huber), picked by the best stage-3 LOO among the configs whose launch-cohort miss stayed
+  under ×2.50: $1M won (LOO ×2.44, cohort ×2.22); $500K (cohort ×2.60) and $250K (cohort
+  ×2.74) failed the gate. The rank-1 recipe is shown beaten, not copied: Huber with no
+  structural exclusions (110 comps, β 0.458) gives LOO ×2.68 against this board's ×2.44.
+  On the Huber fit the breadth candidate passes the pre-committed gate (LOO ×2.44 → ×2.28),
+  so the final model is stage 4; kinship is still rejected. One cost of breadth is reported,
+  not hidden: the out-of-sample band hold thins to 32% inside P25–P75 (v3: 50%), because
+  the breadth coefficient fitted on the pre-2024 cohort does not transfer to the post-2024
+  one — and the post-2024 actuals run a median +0.18 dex above the predictions, so the P25
+  the farms are netted on is conservative, not optimistic.
+- **Launch odds multiply the value:** a second model — logistic, category + log10(days
+  tracked + 30), fitted on all 758 protocols — gives P(a protocol ever records a token |
+  no token after this many days, this category); the odds are the "still to come" transform
+  (R − r)/(1 − r), clamped to 5–90%. Validated out of sample: 5-fold cross-validation
+  predicts which protocols record a token with 65.8% accuracy against a 54.9% base rate
+  (Brier 0.213 against 0.248), calibrated within 5 points per quintile. Implied value =
+  value if it launches × odds, and every farm net is an expected net on that basis.
+  Verdicts move 88/44/19/49 → 54/30/36/80 (ROBUST/FARM/THIN/SKIP); the Starter Basket
+  stays five rows at +$354.03. Steakhouse Financial, the v2/v3 headliner, falls to #52:
+  its curve value is $35.9M but its odds are 19%, so the board prices it at $6.9M.
+
+## What v3 changed over v2 (same model, same snapshot)
 
 The fitted curve is untouched (α 4.44, β 0.353, LOO ×2.54, cohort ×2.18 — identical to v2).
 Four refinements, all computed from the same snapshot:
@@ -33,14 +63,22 @@ Four refinements, all computed from the same snapshot:
 
 ## The model
 
-`radar-3` is a log-log size curve — log10(launch value) = α + β·log10(TVL) — fitted by least
-squares on the traded protocols that survive a written cleaning (market cap ≥ $1M; stablecoin
-issuers, wrapped/staked derivatives, bridge and staking-wrapper categories, versioned instances
-and exchange own-products excluded), followed by one iterated robust trim. On top of the curve:
-family offsets (the snapshot's categories grouped into families, mean residual shrunk n/(n+4)
+`radar-4` is a log-log size curve — log10(launch value) = α + β·log10(TVL) — fitted by Huber
+IRLS (δ = 1.345, scale from the median absolute residual) on the traded protocols that survive
+a written cleaning (market cap ≥ $1M; stablecoin issuers, wrapped/staked derivatives, bridge
+and staking-wrapper categories, versioned instances and exchange own-products excluded), with
+no comp deleted — the farthest are weighted down and listed. On top of the curve: family
+offsets (the snapshot's categories grouped into families, mean residual shrunk n/(n+4)
 toward zero, capped at ±0.6 dex) and two bounded tilts whose forms are stated, not fitted —
 momentum from the seven-day TVL change against the snapshot's median week, capped to
-[0.70, 1.40], and seasoning from days tracked with no token, 1 − 0.25·2^(−days/270).
+[0.70, 1.40], and seasoning from days tracked with no token, 1 − 0.25·2^(−days/270). The
+breadth candidate (value per extra chain) passed the pre-committed gate on the Huber fit and
+is adopted at stage 4; kinship (a traded namesake exists) was rejected.
+
+A second model, launch odds, multiplies the value: a logistic regression on category +
+log10(days tracked + 30), fitted on all 758 protocols, gives P(a protocol ever records a
+token | no token after this many days, this category); the odds are the "still to come"
+transform (R − r)/(1 − r), clamped to 5–90%. Implied value = value if it launches × odds.
 
 Two candidate factors (breadth: value per extra chain; kinship: a traded namesake exists) face a
 pre-committed gate — improve leave-one-out by ≥3%, keep one sign in both listing cohorts, keep

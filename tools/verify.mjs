@@ -114,6 +114,12 @@ if (stk) {
   if (!html.includes(flat)) fail(`html: Steakhouse flat-multiple figure ${flat} not found`);
 }
 
+// 10. Launch odds: every row's implied value is its value-if-launches times its odds.
+for (const r of radar.rows) {
+  if (!(r.odds >= 0.05 && r.odds <= 0.90)) fail(`odds: ${r.slug} odds ${r.odds} outside [0.05, 0.90]`);
+  if (!near(r.implied_value_usd, Math.round(r.value_if_launches * r.odds), 1.5)) fail(`odds: ${r.slug} implied ${r.implied_value_usd} != value-if-launches ${r.value_if_launches} x odds ${r.odds}`);
+}
+
 // 9. The dossier on disk has the vendor shape and carries the model text inside its window
 // (byte equality with a fresh buildDossier is exercised by re-running main and diffing).
 const dossier = JSON.parse(await readFile(join(out, 'dossier.json'), 'utf8'));

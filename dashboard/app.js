@@ -17,7 +17,7 @@ const verdictOf = (r) => (r.farm.robust ? 'ROBUST' : r.farm.verdict);
 const state = { q: '', verdict: 'ALL', cls: 'ALL', watch: false, sortKey: 'rank', sortDir: 1 };
 const SORTS = {
   rank: (r) => r.rank, tvl: (r) => r.tvl_usd, value: (r) => r.implied_value_usd,
-  net: (r) => r.farm.net, nethr: (r) => r.farm.net_hr, farmrank: (r) => r.farm_rank,
+  odds: (r) => r.odds, net: (r) => r.farm.net, nethr: (r) => r.farm.net_hr, farmrank: (r) => r.farm_rank,
   wait: (r) => r.farm.max_wait_months,
 };
 
@@ -44,13 +44,14 @@ function renderBoard() {
     const v = verdictOf(r);
     return `<tr><td class="num">${r.rank}<span class="sub">${r.rank_lo}–${r.rank_hi}</span></td>
 <td><a href="#p=${esc(r.slug)}"><strong>${esc(r.name)}</strong></a>${r.watchlist ? ' ★' : ''}<span class="sub">${esc(r.chain)} · ${esc(r.category ?? '')} · ${esc(r.farm.cls)}</span></td>
-<td class="num">${fmt$(r.tvl_usd)}</td><td class="num"><strong>${fmt$(r.implied_value_usd)}</strong></td>
+<td class="num">${fmt$(r.tvl_usd)}</td><td class="num"><strong>${fmt$(r.implied_value_usd)}</strong><span class="sub">if launches ${fmt$(r.value_if_launches)}</span></td>
+<td class="num">${Math.round(r.odds * 100)}%</td>
 <td class="num band">${fmt$(r.band_p25)} – ${fmt$(r.band_p75)}</td>
 <td class="num">${fmtS$(r.farm.net)}</td><td class="num">${fmtS$(r.farm.net_hr)}</td>
 <td class="num">${r.farm.max_wait_months > 0 ? (r.farm.max_wait_months >= 36 ? '36+' : r.farm.max_wait_months.toFixed(1)) : '—'}</td>
 <td><span class="verdict v-${v.toLowerCase()}">${v}</span><span class="sub">tokenless ${yrs(r.days_no_token)} · Farm Rank #${r.farm_rank}</span></td></tr>`;
   }).join('');
-  host.innerHTML = `<table class="board"><thead><tr>${th('rank', '#', true)}<th>Protocol (chain · category · class)</th>${th('tvl', 'TVL', true)}${th('value', 'Implied P50', true)}<th>Band P25–P75</th>${th('net', 'Net $1k', true)}${th('nethr', 'Net/hr', true)}${th('wait', 'Max Wait', true)}<th>Verdict</th></tr></thead><tbody>${body}</tbody></table>`;
+  host.innerHTML = `<table class="board"><thead><tr>${th('rank', '#', true)}<th>Protocol (chain · category · class)</th>${th('tvl', 'TVL', true)}${th('value', 'Implied P50', true)}${th('odds', 'Odds', true)}<th>Band P25–P75</th>${th('net', 'Net $1k', true)}${th('nethr', 'Net/hr', true)}${th('wait', 'Max Wait', true)}<th>Verdict</th></tr></thead><tbody>${body}</tbody></table>`;
   document.getElementById('board-count').textContent = `${list.length} of ${rows.length} rows shown · ★ = house watchlist · sorted by ${state.sortKey}.`;
   host.querySelectorAll('th.sortable').forEach((el) => el.addEventListener('click', () => {
     const k = el.getAttribute('data-sort');
@@ -74,6 +75,7 @@ function renderDetail(slug) {
 <h2>#${r.rank} — ${esc(r.name)}${r.watchlist ? ' ★ watchlist' : ''}</h2>
 <p class="meta">${esc(r.category ?? '')} · family ${esc(r.family)} · ${r.chains.map(esc).join(', ')} · TVL ${fmtFull$(r.tvl_usd)} · tokenless ${yrs(r.days_no_token)} (${r.days_no_token} days) · seven-day TVL ${r.change_7d == null ? 'not reported' : `${r.change_7d.toFixed(1)}%`}</p>
 <p class="bigvalue">Implied launch value <strong>${fmtFull$(r.implied_value_usd)}</strong> <span class="band">P25–P75 ${fmtFull$(r.band_p25)} – ${fmtFull$(r.band_p75)} · P10–P90 ${fmtFull$(r.band_p10)} – ${fmtFull$(r.band_p90)}</span></p>
+<p class="note">Value if it launches ${fmtFull$(r.value_if_launches)} × launch odds ${Math.round(r.odds * 100)}% = ${fmtFull$(r.implied_value_usd)}. The farm nets below are expected nets on that basis: the drop pays only if the token launches.</p>
 ${wf}${peers}${flags}
 <h3>The farm, netted — ${esc(f.cls)}-weighted, ${f.hold_days}-day hold, Farm Rank #${r.farm_rank} (value rank #${r.rank}, divergence ${r.divergence >= 0 ? '+' : ''}${r.divergence})</h3>
 <table class="costs"><tbody>

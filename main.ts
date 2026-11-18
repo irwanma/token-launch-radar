@@ -1,4 +1,4 @@
-// Token Launch Radar v2 — entry point.
+// Token Launch Radar v4 — entry point.
 //
 // The house runner invokes `node main.ts --input <snapshot>` with MAKEFUN_OUTPUT_DIR set; the
 // entry reads the sealed snapshot and writes the dossier at the output root: board.json, data.js

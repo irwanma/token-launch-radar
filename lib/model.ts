@@ -1,4 +1,4 @@
-// Token Launch Radar v2 — model "radar-3" (Node 22, standard library only).
+// Token Launch Radar v4 — model "radar-4" (Node 22, standard library only).
 //
 // What this file does, in order:
 //   1. Coverage: the snapshot's 758 protocols are accounted for to the last one — 416 record a
@@ -148,6 +148,7 @@ export interface Fit {
   offsets: Map<string, number>;
   breadthCoef: number;
   kinshipCoef: number;
+  weights: number[];
 }
 
 const DAY_MS = 86_400_000;
@@ -179,6 +180,37 @@ function ols(rows: Protocol[]): { alpha: number; beta: number; r2: number } {
   const ssr = ys.reduce((a, y, i) => a + (y - (alpha + beta * xs[i]!)) ** 2, 0);
   const sst = ys.reduce((a, y) => a + (y - my) ** 2, 0);
   return { alpha, beta, r2: 1 - ssr / sst };
+}
+
+/** Huber IRLS on log10(mcap) ~ log10(TVL): δ=1.345, scale from the MAD of the residuals,
+ * iterated to convergence from the OLS start. A far comp is weighted down, never deleted:
+ * the returned weights say how much each row counted, so the board can print the
+ * downweighted list instead of silently dropping names. Plain R² of the Huber fit is
+ * reported for the record; LOO is the honest comparator, because R² on an untrimmed
+ * set is not comparable with R² on a trimmed one. */
+function huber(rows: Protocol[]): { alpha: number; beta: number; r2: number; weights: number[] } {
+  const xs = rows.map((p) => Math.log10(p.tvl_usd));
+  const ys = rows.map((p) => Math.log10(p.mcap_usd!));
+  let { alpha, beta } = ols(rows);
+  let weights = xs.map(() => 1);
+  for (let iter = 0; iter < 100; iter++) {
+    const resid = ys.map((y, i) => y - (alpha + beta * xs[i]!));
+    const centre = median(resid);
+    const sigma = 1.4826 * median(resid.map((r) => Math.abs(r - centre))) || 1e-9;
+    weights = resid.map((r) => (Math.abs(r) <= 1.345 * sigma ? 1 : (1.345 * sigma) / Math.abs(r)));
+    const sw = weights.reduce((a, w) => a + w, 0);
+    const mx = weights.reduce((a, w, i) => a + w * xs[i]!, 0) / sw;
+    const my = weights.reduce((a, w, i) => a + w * ys[i]!, 0) / sw;
+    let sxy = 0, sxx = 0;
+    for (let i = 0; i < xs.length; i++) { sxy += weights[i]! * (xs[i]! - mx) * (ys[i]! - my); sxx += weights[i]! * (xs[i]! - mx) ** 2; }
+    const nextBeta = sxy / sxx, nextAlpha = my - nextBeta * mx;
+    if (Math.abs(nextAlpha - alpha) < 1e-12 && Math.abs(nextBeta - beta) < 1e-12) { alpha = nextAlpha; beta = nextBeta; break; }
+    alpha = nextAlpha; beta = nextBeta;
+  }
+  const my = mean(ys);
+  const ssr = ys.reduce((a, y, i) => a + (y - (alpha + beta * xs[i]!)) ** 2, 0);
+  const sst = ys.reduce((a, y) => a + (y - my) ** 2, 0);
+  return { alpha, beta, r2: 1 - ssr / sst, weights };
 }
 
 /** Family offsets: mean curve residual per family, shrunk n/(n+4) toward zero, capped at ±0.6 dex. */
@@ -239,10 +271,12 @@ function predictStage(fit: Fit, p: Protocol, stage: number, medianChange: number
 
 function fitStage(rows: Protocol[], stage: number, medianChange: number, asOfMs: number, tradedRoots: Map<string, Protocol[]>): Fit {
   if (stage === 0) {
-    return { alpha: median(rows.map((p) => p.mcap_usd! / p.tvl_usd)), beta: 0, r2: 0, offsets: new Map(), breadthCoef: 0, kinshipCoef: 0 };
+    return { alpha: median(rows.map((p) => p.mcap_usd! / p.tvl_usd)), beta: 0, r2: 0, offsets: new Map(), breadthCoef: 0, kinshipCoef: 0, weights: [] };
   }
-  const { alpha, beta, r2 } = ols(rows);
-  const fit: Fit = { alpha, beta, r2, offsets: stage >= 2 ? familyOffsets(rows, alpha, beta) : new Map(), breadthCoef: 0, kinshipCoef: 0 };
+  // radar-4: the curve is a Huber fit (downweights, never deletes); OLS survives only in
+  // the big-tent ablation row, computed separately below.
+  const { alpha, beta, r2, weights } = huber(rows);
+  const fit: Fit = { alpha, beta, r2, offsets: stage >= 2 ? familyOffsets(rows, alpha, beta) : new Map(), breadthCoef: 0, kinshipCoef: 0, weights };
   if (stage >= 4) {
     const c = candidateCoefs(rows, fit, tradedRoots, medianChange, asOfMs);
     fit.breadthCoef = c.breadth;
@@ -271,6 +305,95 @@ function loo(rows: Protocol[], stage: number, medianChange: number, asOfMs: numb
     in10: misses.filter((m) => m <= 10).length / misses.length,
     predictions,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Launch odds (radar-4). P(a protocol ever records a token | no token after `age`
+// days, category c), from a logistic model on category + log10(age + 30), fitted on
+// every protocol in the snapshot by plain gradient descent (fixed 3000 steps, lr 0.5,
+// L2 1.0, zero init — deterministic, no randomness). The odds are the "still to come"
+// transform: (R_c − r) / (1 − r), where r = P(has token | category, age) and
+// R_c = P(has token | category, age 2500 days, treated as resolved). Clamped to
+// [0.05, 0.90]: a protocol tracked four years with no token is not quite dead, and
+// no protocol is ever called a sure thing. The censoring is stated, not hidden: the
+// snapshot is one cross-section, so "ever" is estimated from rates across ages, not
+// observed; the logistic itself is validated by 5-fold cross-validation below.
+// ---------------------------------------------------------------------------
+
+/** Deterministic string hash (FNV-1a) for the cross-validation folds. */
+function hashStr(s: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return (h >>> 0) % 5;
+}
+
+interface OddsFit { weights: number[]; bigCategories: string[] }
+
+function oddsFeatures(p: Protocol, bigCategories: string[], ageDays: number): number[] {
+  const x = [1, Math.log10(ageDays + 30)];
+  for (const c of bigCategories) x.push((p.category ?? '?') === c ? 1 : 0);
+  return x;
+}
+
+function oddsLogit(p: Protocol, fit: OddsFit, asOfMs: number, ageOverride?: number): number {
+  const x = oddsFeatures(p, fit.bigCategories, ageOverride ?? trackedDays(p, asOfMs));
+  const z = fit.weights.reduce((a, w, i) => a + w * x[i]!, 0);
+  return 1 / (1 + Math.exp(-Math.max(-30, Math.min(30, z))));
+}
+
+function fitOdds(rows: Protocol[], asOfMs: number): OddsFit {
+  const counts = new Map<string, number>();
+  for (const p of rows) counts.set(p.category ?? '?', (counts.get(p.category ?? '?') ?? 0) + 1);
+  const bigCategories = [...counts.entries()].filter(([, n]) => n >= 15).map(([c]) => c).sort();
+  const X = rows.map((p) => oddsFeatures(p, bigCategories, trackedDays(p, asOfMs)));
+  const y = rows.map((p) => (recordsToken(p) ? 1 : 0));
+  const w = new Array<number>(X[0]!.length).fill(0);
+  const n = rows.length, lr = 0.5, l2 = 1.0;
+  for (let iter = 0; iter < 3000; iter++) {
+    const g = new Array<number>(w.length).fill(0);
+    for (let i = 0; i < n; i++) {
+      const z = w.reduce((a, wj, j) => a + wj * X[i]![j]!, 0);
+      const pr = 1 / (1 + Math.exp(-Math.max(-30, Math.min(30, z))));
+      for (let j = 0; j < w.length; j++) g[j]! += (pr - y[i]!) * X[i]![j]!;
+    }
+    for (let j = 0; j < w.length; j++) w[j]! -= lr * (g[j]! / n + (l2 * w[j]!) / n);
+  }
+  return { weights: w, bigCategories };
+}
+
+/** [odds, P(has token | age), P(has token | resolved age)] for one protocol. */
+function oddsOf(p: Protocol, fit: OddsFit, asOfMs: number): [number, number, number] {
+  const r = oddsLogit(p, fit, asOfMs);
+  const R = oddsLogit(p, fit, asOfMs, 2500);
+  const o = r >= 1 ? 0.05 : (R - r) / (1 - r);
+  return [Math.min(0.9, Math.max(0.05, o)), r, R];
+}
+
+interface OddsValidation { accuracy: number; brier: number; base_rate: number; base_brier: number; calibration: { pred: number; obs: number; n: number }[] }
+
+/** 5-fold cross-validation of the logistic engine (folds by slug hash, deterministic):
+ * accuracy at the 0.5 threshold and Brier score against the base rate, plus a
+ * calibration table of out-of-fold predictions in quintiles. */
+function oddsValidation(rows: Protocol[], asOfMs: number): OddsValidation {
+  const oof: { pred: number; y: number }[] = [];
+  for (let fold = 0; fold < 5; fold++) {
+    const test = rows.filter((p) => hashStr(p.slug) === fold);
+    const train = rows.filter((p) => hashStr(p.slug) !== fold);
+    const fit = fitOdds(train, asOfMs);
+    for (const p of test) oof.push({ pred: oddsLogit(p, fit, asOfMs), y: recordsToken(p) ? 1 : 0 });
+  }
+  const n = oof.length;
+  const accuracy = oof.filter((o) => (o.pred >= 0.5) === (o.y === 1)).length / n;
+  const brier = oof.reduce((a, o) => a + (o.pred - o.y) ** 2, 0) / n;
+  const base = Math.max(oof.filter((o) => o.y === 1).length, oof.filter((o) => o.y === 0).length) / n;
+  const baseBrier = oof.reduce((a, o) => a + (base - o.y) ** 2, 0) / n;
+  const sorted = [...oof].sort((a, b) => a.pred - b.pred);
+  const calibration: OddsValidation['calibration'] = [];
+  for (let q = 0; q < 5; q++) {
+    const grp = sorted.slice(Math.floor((q * n) / 5), Math.floor(((q + 1) * n) / 5));
+    calibration.push({ pred: mean(grp.map((o) => o.pred)), obs: mean(grp.map((o) => o.y)), n: grp.length });
+  }
+  return { accuracy, brier, base_rate: base, base_brier: baseBrier, calibration };
 }
 
 // ---------------------------------------------------------------------------
@@ -452,6 +575,8 @@ export interface RadarRow extends BoardRow {
   rank_lo: number;
   rank_hi: number;
   divergence: number;
+  odds: number;
+  value_if_launches: number;
   farm: FarmCalc;
   peers: { name: string; tvl_usd: number; mcap_usd: number }[] | null;
   waterfall: { label: string; value: number }[] | null;
@@ -473,7 +598,11 @@ export interface Radar {
     families: { family: string; n: number; offset: number }[];
     band_dex: { q10: number; q25: number; q75: number; q90: number };
     loo: { stage: string; median_miss: number; in3: number; in10: number }[];
-    cohort: { train_n: number; test_n: number; flat_miss: number; model_miss: number; flat_in3: number; model_in3: number; stage2_miss: number; stage2_in3: number; band_hold_2575: number; band_hold_1090: number };
+    cohort: { train_n: number; test_n: number; flat_miss: number; model_miss: number; flat_in3: number; model_in3: number; stage2_miss: number; stage2_in3: number; band_hold_2575: number; band_hold_1090: number; rev_train_n: number; rev_test_n: number; rev_miss: number; rev_in3: number; post_resid_median: number };
+    grid: { floor: number; n: number; loo: number; in3: number; cohort: number; picked: boolean; cohort_ok: boolean }[];
+    bigtent: { n: number; beta: number; loo: number; in3: number };
+    downweighted: { name: string; weight: number }[];
+    odds: { accuracy: number; brier: number; base_rate: number; base_brier: number; calibration: { pred: number; obs: number; n: number }[]; median: number };
     rank_bootstrap_refits: number;
     worst: { name: string; miss: number; predicted: number; actual: number }[];
     buckets: { label: string; n: number; q25: number; q75: number }[];
@@ -514,26 +643,42 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
     if (r != null) { if (!tradedRoots.has(r)) tradedRoots.set(r, []); tradedRoots.get(r)!.push(p); }
   }
 
-  // Train: clean traded comps, structural exclusions first, then one robust trim, iterated.
+  // Train (radar-4): structural exclusions first, then the pre-committed configuration
+  // grid {floor $1M / $500K / $250K} × {Huber}, chosen by the best stage-3 LOO among
+  // the configs whose pre→post cohort miss is no worse than ×2.50, ties to the larger
+  // n. No comp is trimmed any more: Huber downweights the far ones instead, and the
+  // board prints the downweighted list. The grid and its results are in the lab.
   const medianChange = median(all.filter((p) => p.change_7d != null).map((p) => p.change_7d!));
-  let train = tokenedRows.filter((p) =>
-    p.mcap_usd != null && p.mcap_usd >= 1_000_000 &&
+  const structural = (p: Protocol, floor: number): boolean =>
+    p.mcap_usd != null && p.mcap_usd >= floor &&
     !INFRA_CATEGORIES.has(p.category ?? '') && !STABLE_ISSUER_CATEGORIES.has(p.category ?? '') &&
-    !isDerivativeName(p) && !isVersionedName(p) && !isExchangeName(p));
+    !isDerivativeName(p) && !isVersionedName(p) && !isExchangeName(p);
+  const cohortMiss3 = (rows: Protocol[]): number => {
+    const pre = rows.filter((p) => p.listed_at != null && p.listed_at < '2024-01-01');
+    const post = rows.filter((p) => p.listed_at != null && p.listed_at >= '2024-01-01');
+    if (pre.length < 5 || post.length === 0) return Infinity;
+    const f = fitStage(pre, 3, medianChange, asOfMs, tradedRoots);
+    return median(post.map((p) => missOf(predictStage(f, p, 3, medianChange, asOfMs, false), p.mcap_usd!)));
+  };
+  const grid: Radar['model']['grid'] = [1_000_000, 500_000, 250_000].map((floor) => {
+    const cands = tokenedRows.filter((p) => structural(p, floor));
+    const l = loo(cands, 3, medianChange, asOfMs, tradedRoots, { breadth: false, kinship: false });
+    const cohort = cohortMiss3(cands);
+    return { floor, n: cands.length, loo: l.medianMiss, in3: l.in3, cohort, picked: false, cohort_ok: cohort <= 2.5 };
+  });
+  const eligible = grid.filter((g) => g.cohort_ok).sort((a, b) => a.loo - b.loo || b.n - a.n);
+  const pickedGrid = (eligible[0] ?? [...grid].sort((a, b) => a.loo - b.loo || b.n - a.n)[0]!);
+  pickedGrid.picked = true;
+  const train = tokenedRows.filter((p) => structural(p, pickedGrid.floor));
   const nCandidates = train.length;
   const trimmed: string[] = [];
-  for (let round = 0; round < 3 && train.length > 10; round++) {
-    const f = ols(train);
-    const resid = train.map((p) => Math.log10(p.mcap_usd!) - (f.alpha + f.beta * Math.log10(p.tvl_usd)));
-    const centre = median(resid);
-    const sigma = 1.4826 * median(resid.map((r) => Math.abs(r - centre)));
-    const drop = train.filter((_, i) => Math.abs(resid[i]! - centre) > 2.5 * sigma);
-    if (drop.length === 0) break;
-    for (const p of drop) trimmed.push(p.name);
-    const dropSet = new Set(drop.map((p) => p.slug));
-    train = train.filter((p) => !dropSet.has(p.slug));
-  }
-  trimmed.sort();
+  // The rank-1 recipe as a labelled comparison: Huber on the big tent (no structural
+  // exclusions, $1M floor) — the board shows it beats that recipe on LOO rather than
+  // copying it.
+  const bigTentRows = tokenedRows.filter((p) => p.mcap_usd != null && p.mcap_usd >= 1_000_000);
+  const bigTentLoo = loo(bigTentRows, 3, medianChange, asOfMs, tradedRoots, { breadth: false, kinship: false });
+  const bigTentFit = fitStage(bigTentRows, 3, medianChange, asOfMs, tradedRoots);
+  const bigtent = { n: bigTentRows.length, beta: bigTentFit.beta, loo: bigTentLoo.medianMiss, in3: bigTentLoo.in3 };
 
   // The pre-committed candidate gate: LOO gain >= 3%, one sign in both cohort halves, >= 80% of
   // bootstrap refits agreeing in sign. Evaluated once, on the full train set, before any board row
@@ -598,8 +743,8 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
   // Launch-cohort split: fit on listings before 2024, test on listings from 2024, snapshot features.
   const cohortFit = fitStage(preCohort, finalStage, medianChange, asOfMs, tradedRoots);
   const cohortFlat = fitStage(preCohort, 0, medianChange, asOfMs, tradedRoots);
-  const cohortMiss = (fit: Fit, stage: number): { medianMiss: number; in3: number } => {
-    const ms = postCohort.map((p) => {
+  const cohortMiss = (fit: Fit, stage: number, testRows: Protocol[] = postCohort): { medianMiss: number; in3: number } => {
+    const ms = testRows.map((p) => {
       let v = predictStage(fit, p, stage, medianChange, asOfMs, gated.breadth);
       if (stage >= 4 && gated.kinship && hasTradedNamesake(p, tradedRoots)) v *= Math.pow(10, fit.kinshipCoef);
       return missOf(v, p.mcap_usd!);
@@ -609,6 +754,9 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
   const cohortModel = cohortMiss(cohortFit, finalStage);
   const cohortFlatR = cohortMiss(cohortFlat, 0);
   const cohortStage2 = cohortMiss(fitStage(preCohort, 2, medianChange, asOfMs, tradedRoots), 2);
+  // Two-way cohort split: the reverse direction (fit post-2024, test pre-2024) is a
+  // diagnostic, not a gate — printed in the validation panel either way.
+  const cohortRev = cohortMiss(fitStage(postCohort, finalStage, medianChange, asOfMs, tradedRoots), finalStage, preCohort);
 
   // v3: out-of-sample band hold rate. The band's quartiles are built from the pre-2024 comps'
   // own leave-one-out residuals, then the post-2024 comps are checked against that band — so
@@ -626,30 +774,44 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
   const holdQ25 = quantile(preLooResid, 0.25), holdQ75 = quantile(preLooResid, 0.75);
   const holdQ10 = quantile(preLooResid, 0.1), holdQ90 = quantile(preLooResid, 0.9);
   let hold2575 = 0, hold1090 = 0;
+  const postResid: number[] = [];
   for (const p of postCohort) {
     let v = predictStage(cohortFit, p, finalStage, medianChange, asOfMs, gated.breadth);
     if (finalStage >= 4 && gated.kinship && hasTradedNamesake(p, tradedRoots)) v *= Math.pow(10, cohortFit.kinshipCoef);
     const r = Math.log10(p.mcap_usd! / v);
+    postResid.push(r);
     if (r >= holdQ25 && r <= holdQ75) hold2575++;
     if (r >= holdQ10 && r <= holdQ90) hold1090++;
   }
   const bandHold2575 = postCohort.length === 0 ? 0 : hold2575 / postCohort.length;
   const bandHold1090 = postCohort.length === 0 ? 0 : hold1090 / postCohort.length;
+  const postResidMedian = postResid.length === 0 ? 0 : median(postResid);
 
-  // Price the board.
+  // Launch odds, fitted once on all 758 protocols (the odds do not depend on the comp
+  // set, so they are not refit inside the bootstrap below).
+  const oddsFit = fitOdds(all, asOfMs);
+  const oddsVal = oddsValidation(all, asOfMs);
+
+  // Price the board. Implied value = value if it launches × launch odds: the farm nets
+  // below are expected nets — the drop pays only if the token launches, the costs are
+  // paid either way.
   const fit = fitStage(train, finalStage, medianChange, asOfMs, tradedRoots);
   const bandLoMult = Math.pow(10, bandDex.q25);
   const priced = pool.map((p) => {
     let v = predictStage(fit, p, finalStage, medianChange, asOfMs, gated.breadth);
     if (finalStage >= 4 && gated.kinship && hasTradedNamesake(p, tradedRoots)) v *= Math.pow(10, fit.kinshipCoef);
-    return { p, v };
-  }).sort((a, b) => b.v - a.v || (a.p.slug < b.p.slug ? -1 : 1));
+    const valueIfLaunches = Math.max(1, Math.round(v));
+    const [o] = oddsOf(p, oddsFit, asOfMs);
+    const implied = Math.max(1, Math.round(valueIfLaunches * o));
+    return { p, v: valueIfLaunches, odds: o, implied };
+  }).sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : 1));
 
-  const rows: RadarRow[] = priced.map(({ p, v }, i) => {
-    const value = Math.max(1, Math.round(v));
+  const rows: RadarRow[] = priced.map(({ p, v, odds, implied }, i) => {
+    const value = implied;
     const farm = farmCalc(p, value, bandLoMult);
     return {
       slug: p.slug, name: p.name, rank: i + 1, implied_value_usd: value,
+      odds, value_if_launches: v,
       farm_steps: farmSteps(p, farm, watch.has(p.slug)),
       category: p.category, family: familyOf(p), chains: p.chains, chain: p.chains[0] ?? 'Ethereum',
       tvl_usd: p.tvl_usd, change_7d: p.change_7d, days_no_token: trackedDays(p, asOfMs),
@@ -678,7 +840,10 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
       const pricedB = pool.map((p) => {
         let v = predictStage(f, p, finalStage, medianChange, asOfMs, gated.breadth);
         if (finalStage >= 4 && gated.kinship && hasTradedNamesake(p, tradedRoots)) v *= Math.pow(10, f.kinshipCoef);
-        return { slug: p.slug, v };
+        // The odds are fitted once on the snapshot, not per refit: a bootstrap refit
+        // re-prices the value model, the odds stay the row's own.
+        const [o] = oddsOf(p, oddsFit, asOfMs);
+        return { slug: p.slug, v: Math.max(1, Math.round(v)) * o };
       }).sort((a, b2) => b2.v - a.v || (a.slug < b2.slug ? -1 : 1));
       pricedB.forEach((x, i) => { rankSamples.get(x.slug)!.push(i + 1); });
     }
@@ -706,20 +871,25 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
     const afterFamily = curveOnly * Math.pow(10, fit.offsets.get(row.family) ?? 0);
     const afterMom = afterFamily * momentumFactor(p, medianChange);
     const afterSeasoning = afterMom * seasoningFactor(p, asOfMs);
+    const gatedValue = afterSeasoning
+      * (finalStage >= 4 && gated.breadth ? Math.pow(10, clamp(fit.breadthCoef * (p.chains.length - 1), -0.2, 0.2)) : 1)
+      * (finalStage >= 4 && gated.kinship && hasTradedNamesake(p, tradedRoots) ? Math.pow(10, fit.kinshipCoef) : 1);
     row.waterfall = [
       { label: 'Size curve on TVL alone', value: Math.round(curveOnly) },
       { label: `Family offset (${row.family})`, value: Math.round(afterFamily) },
       { label: 'Momentum tilt (7-day TVL vs the snapshot median week)', value: Math.round(afterMom) },
       { label: 'Seasoning tilt (days tracked with no token)', value: Math.round(afterSeasoning) },
     ];
-    if (Math.abs(row.implied_value_usd - Math.round(afterSeasoning)) > 1) {
-      row.waterfall.push({ label: 'Gated candidate factor', value: row.implied_value_usd });
+    if (Math.abs(gatedValue - afterSeasoning) > 1) {
+      row.waterfall.push({ label: 'Gated candidate factor', value: Math.round(gatedValue) });
     }
+    row.waterfall.push({ label: `Launch odds ${(row.odds * 100).toFixed(0)}% — value if it launches × odds it ever launches`, value: row.implied_value_usd });
     const flags: string[] = [];
     if (p.chains.length === 1) flags.push(`Single-chain record: every dollar of its TVL sits on ${p.chains[0]}; the snapshot shows no cross-chain footprint.`);
     if (p.change_7d != null && Math.abs(p.change_7d) >= 25) flags.push(`A violent week: TVL moved ${p.change_7d.toFixed(1)}% in seven days — a hot or bleeding record, not a steady state.`);
     if (p.listed_at == null) flags.push('Listing date not reported in the snapshot; the seasoning tilt uses the stated 365-day default for this row.');
     else if (trackedDays(p, asOfMs) < 90) flags.push(`Young record: DefiLlama has tracked it for only ${trackedDays(p, asOfMs)} days, so the curve is pricing a short history.`);
+    if (row.odds <= 0.10) flags.push(`Long odds: the launch-odds model gives this row ${(row.odds * 100).toFixed(0)}% — most protocols in its category and age band never record a token, so the implied value is a small fraction of the value if it launches.`);
     const famComps = train.filter((q) => familyOf(q) === row.family).length;
     if (famComps < 3) flags.push(`Thin comp set: only ${famComps} traded protocols in its family price this row, so the global curve does most of the work.`);
     if (isVersionedName(p)) flags.push('A versioned instance: the board prices this deployment, and a sibling deployment may carry the same brand.');
@@ -776,12 +946,15 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
       .sort((a, b) => b.count - a.count),
     ledger,
     model: {
-      name: 'radar-3', alpha: fit.alpha, beta: fit.beta, r2: fit.r2,
+      name: 'radar-4', alpha: fit.alpha, beta: fit.beta, r2: fit.r2,
       flat_multiple: median(train.map((p) => p.mcap_usd! / p.tvl_usd)),
       n_candidates: nCandidates, n_train: train.length, trimmed,
       median_change_7d: medianChange, families: famSummary, band_dex: bandDex,
       loo: looStages,
-      cohort: { train_n: preCohort.length, test_n: postCohort.length, flat_miss: cohortFlatR.medianMiss, model_miss: cohortModel.medianMiss, flat_in3: cohortFlatR.in3, model_in3: cohortModel.in3, stage2_miss: cohortStage2.medianMiss, stage2_in3: cohortStage2.in3, band_hold_2575: bandHold2575, band_hold_1090: bandHold1090 },
+      cohort: { train_n: preCohort.length, test_n: postCohort.length, flat_miss: cohortFlatR.medianMiss, model_miss: cohortModel.medianMiss, flat_in3: cohortFlatR.in3, model_in3: cohortModel.in3, stage2_miss: cohortStage2.medianMiss, stage2_in3: cohortStage2.in3, band_hold_2575: bandHold2575, band_hold_1090: bandHold1090, rev_train_n: postCohort.length, rev_test_n: preCohort.length, rev_miss: cohortRev.medianMiss, rev_in3: cohortRev.in3, post_resid_median: postResidMedian },
+      grid, bigtent,
+      downweighted: train.map((p, i) => ({ name: p.name, weight: fit.weights[i]! })).filter((d) => d.weight < 0.5).sort((a, b) => a.weight - b.weight),
+      odds: { accuracy: oddsVal.accuracy, brier: oddsVal.brier, base_rate: oddsVal.base_rate, base_brier: oddsVal.base_brier, calibration: oddsVal.calibration, median: median(rows.map((r) => r.odds)) },
       rank_bootstrap_refits: RANK_BOOTSTRAP_REFITS,
       worst, buckets, gates,
     },
