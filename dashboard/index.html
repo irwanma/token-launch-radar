@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>%%TITLE%%</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="masthead">
+<div class="brand">TOKEN LAUNCH RADAR <span class="modeltag">radar-3</span></div>
+<p class="counts">%%HEADER_COUNTS%%</p>
+<p class="lede">Every pre-token protocol in the snapshot, priced by a size curve fitted on the protocols that already trade — backtested in the open, quoted with its error band, and netted into farms on a $1,000 ticket with the costs itemised. No number on this page is asserted: each one is recomputed from the sealed snapshot by the entry's own code, and a verifier in the repo fails the build if the page and the board ever disagree.</p>
+</header>
+<main>
+%%MODEL_PANEL%%
+%%VALIDATION_PANEL%%
+%%BASKET_STRIP%%
+%%TOP_TABLE%%
+<section class="panel" id="board-panel">
+<h2>The full board — sortable, filterable</h2>
+<div class="controls">
+<label>Search <input id="q" type="search" placeholder="protocol, category, chain"></label>
+<label>Verdict <select id="f-verdict"><option value="ALL">All verdicts</option><option value="ROBUST">ROBUST</option><option value="FARM">FARM</option><option value="THIN">THIN</option><option value="SKIP">SKIP</option></select></label>
+<label>Class <select id="f-class"><option value="ALL">All classes</option><option value="Capital">Capital</option><option value="Hybrid">Hybrid</option><option value="Points">Points</option></select></label>
+<label class="chk"><input id="f-watch" type="checkbox"> Watchlist only</label>
+</div>
+<div id="board"><p class="note">The board renders from data.js, which ships beside this page.</p></div>
+<p class="note" id="board-count"></p>
+</section>
+<div id="detail"></div>
+%%STEAKHOUSE_DETAIL%%
+%%LAB_PANEL%%
+%%FUNNEL_FOOTER%%
+%%ASSUMPTIONS_BOX%%
+</main>
+<footer class="colophon">Token Launch Radar · model radar-3 · built from the sealed snapshot alone — no live prices, no network, no clock. board.json and data.js ship with this page and carry every figure shown.</footer>
+<script src="../data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
